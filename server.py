@@ -12,6 +12,8 @@ from astral import Astral
 # In manual, left goes up assuming it's not up. right goes down assuming
 #  any button while moving stops it
 
+MAX_MANUAL_MODE_TIME = 60 * 60
+
 AUTO = 0
 MANUAL = 1
 
@@ -25,6 +27,7 @@ DOWN = CLOSED = 2
 door_status = UNKNOWN
 direction = IDLE
 door_mode = AUTO
+manual_mode_start = 0
 
 a = Astral()
 city = a["Boston"]
@@ -34,6 +37,7 @@ GPIO.setmode(GPIO.BCM)
 GPIO.setup(18, GPIO.OUT)
 GPIO.setup(12, GPIO.OUT)
 GPIO.setup(16, GPIO.OUT)
+GPIO.setup(26, GPIO.OUT)  #LED
 GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(20, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(13, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -63,7 +67,7 @@ def openDoor():
     GPIO.output(16, GPIO.LOW)
     direction= UP
 
-def stopDoor(delay, status):
+def stopDoor(delay):
     global direction, door_status
 
     print "Stop door"
@@ -72,27 +76,35 @@ def stopDoor(delay, status):
     GPIO.output(12, GPIO.LOW)
     GPIO.output(16, GPIO.LOW)
     direction = IDLE
-    door_status = status
+
+    (top, bottom) = currentInputStatus()
+    if (top == TRIGGERED):
+        print "Door is open"
+        door_status = OPEN
+    elif (bottom == TRIGGERED):
+        print "Door is closed"
+        door_status = CLOSED
+    else:
+        door_status = UNKNOWN
 
 def checkTime():
-    global door_mode
+    global door_mode, door_status, direction
     while True:
         if door_mode == AUTO:
             current = datetime.datetime.now(pytz.timezone('US/Eastern'))
             sun = city.sun(date=datetime.datetime.now(), local=True)
 
-            print sun["sunset"]
-            print current
-            print sun["sunset"] - current
+            #print sun["sunset"]
+            #print current
+            #print sun["sunset"] - current
 
-            if (current < sun["sunrise"] or current > sun["sunset"]) and door_status != CLOSED:
+            if (current < sun["sunrise"] or current > sun["sunset"]) and door_status != CLOSED and direction != DOWN:
                 print "Door should be closed"
                 closeDoor()
-            elif current > sun["sunrise"] and current < sun["sunset"] and door_status != OPEN:
+            elif current > sun["sunrise"] and current < sun["sunset"] and door_status != OPEN and direction != UP:
                 print "Door should be open"
                 openDoor()
-
-        time.sleep(600)
+        time.sleep(1)
 
 def currentInputStatus():
     bottom = GPIO.input(21)
@@ -103,44 +115,67 @@ def checkInputs():
     while True:
         (top, bottom) = currentInputStatus()
         if (direction == UP and top == TRIGGERED):
-            stopDoor(0, OPEN)
+            stopDoor(0)
         if (direction == DOWN and bottom == TRIGGERED):
-            stopDoor(1, CLOSED)
+            stopDoor(1)
         time.sleep(0.01)
 
-def buttonPress(button):
-    global door_mode, direction, door_status
-    start = int(round(time.time() * 1000))
-    print "Button Start"
+def blink():
+    global door_mode, manual_mode_start
+    while(door_mode == MANUAL):
+        GPIO.output(26, GPIO.LOW)
+        time.sleep(1)
+        GPIO.output(26, GPIO.HIGH)
+        time.sleep(1)
+        print (time.time()) - manual_mode_start
+        if int(time.time()) - manual_mode_start > MAX_MANUAL_MODE_TIME:
+            print "In manual mode too long"
+            changeDoorMode(AUTO)
 
-    GPIO.remove_event_detect(button)
-    GPIO.wait_for_edge(button, GPIO.FALLING)
-
-    print "Button End"
-    GPIO.remove_event_detect(button)
-    GPIO.add_event_detect(button, GPIO.RISING, callback=buttonPress, bouncetime=200)
-
-    end = int(round(time.time() * 1000))
-    diff = end - start
-    print diff
-
-    if (diff > 2000):
-        if (door_mode == AUTO):
-            door_mode = MANUAL
-            print "Enter manual mode"
-            stopDoor(0, UNKNOWN)
-        else:
-            door_mode = AUTO
-            print "Enter auto mode"
+def changeDoorMode(new_mode):
+    global door_mode, manual_mode_start
+    if new_mode == AUTO: 
+        print "Enter auto mode"
+        door_mode = AUTO
+        GPIO.output(26, GPIO.HIGH)
     else:
-        # Quick touch, what mode?
-        if (door_mode == MANUAL):
-            if (direction != IDLE):
-                stopDoor(0, UNKNOWN)
-            elif (button == 13):
-                openDoor()
+        print "Enter manual mode"
+        door_mode = MANUAL
+        stopDoor(0)
+        
+        manual_mode_start = int(time.time())
+
+        t2 = Thread(target = blink)
+        t2.setDaemon(True)
+        t2.start()
+        
+def buttonPress(button):
+    global door_mode, direction, door_status, manual_mode_start
+
+    print "Starting button..."
+    start = end = int(round(time.time() * 1000))
+    waiting = True
+    while GPIO.input(button) and waiting:
+        end = int(round(time.time() * 1000))
+        diff = end - start
+        if (diff >= 2000):
+            waiting = False
+            if (door_mode == AUTO):
+                changeDoorMode(MANUAL)
             else:
-                closeDoor()
+                changeDoorMode(AUTO)
+            return
+        time.sleep(0.1)
+    print "Ending"
+ 
+    # Quick touch, what mode?
+    if (door_mode == MANUAL):
+        if (direction != IDLE):
+            stopDoor(0)
+        elif (button == 13):
+            openDoor()
+        else:
+            closeDoor()
 
 def handler(clientsocket, clientaddr):
     print "Accepted connection from: ", clientaddr
@@ -152,7 +187,7 @@ def handler(clientsocket, clientaddr):
         else:
             data = data.strip()
             if (data == 'stop'):
-                stopDoor(0, UNKNOWN)
+                stopDoor(0)
             elif (data == 'open'):
                 openDoor()
             elif (data == 'close'):
@@ -183,16 +218,8 @@ if __name__ == "__main__":
 
     # Get door position
     direction = IDLE
-    (top, bottom) = currentInputStatus()
-    if (top == TRIGGERED):
-        print "Door is open"
-        door_status = OPEN
-    elif (bottom == TRIGGERED):
-        print "Door is closed"
-        door_status = CLOSED
-    else:
-        # Door is in an unknown state, close it.
-        print "Door is in an unknown state, closing it"
+    changeDoorMode(AUTO)
+    stopDoor(0)
 
     ## Setup buttons
     GPIO.add_event_detect(13, GPIO.RISING, callback=buttonPress, bouncetime=200)
@@ -207,5 +234,8 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             break
         time.sleep(0.01)
+
     print "Close connection"
+    GPIO.output(26, GPIO.LOW)
     serversocket.close()
+    stopDoor(0)
