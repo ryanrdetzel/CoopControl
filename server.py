@@ -17,9 +17,12 @@ from astral import Astral
 
 class Door(object):
     MAX_MANUAL_MODE_TIME = 60 * 60
+    AFTER_SUNSET_DELAY = 30
     IDLE = UNKNOWN = NOT_TRIGGERED = AUTO = 0
     UP = OPEN = TRIGGERED = MANUAL = 1
     DOWN = CLOSED = 2
+
+    PIN_LED = 5
 
     def __init__(self):
         self.door_status = Door.UNKNOWN
@@ -65,7 +68,7 @@ class Door(object):
             time.sleep(0.01)
 
         print "Close connection"
-        GPIO.output(26, GPIO.LOW)
+        GPIO.output(Door.PIN_LED, GPIO.LOW)
         serversocket.close()
         self.stopDoor(0)
 
@@ -75,7 +78,7 @@ class Door(object):
         GPIO.setup(18, GPIO.OUT)
         GPIO.setup(12, GPIO.OUT)
         GPIO.setup(16, GPIO.OUT)
-        GPIO.setup(26, GPIO.OUT)  #LED
+        GPIO.setup(Door.PIN_LED, GPIO.OUT)  #LED
         GPIO.setup(21, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(20, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(13, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -127,14 +130,12 @@ class Door(object):
                 current = datetime.datetime.now(pytz.timezone('US/Eastern'))
                 sun = self.city.sun(date=datetime.datetime.now(), local=True)
 
-                #print sun["sunset"]
-                #print current
-                #print sun["sunset"] - current
+                after_sunset = sun["sunset"] + datetime.timedelta(minutes = Door.AFTER_SUNSET_DELAY)
 
-                if (current < sun["sunrise"] or current > sun["sunset"]) and self.door_status != Door.CLOSED and self.direction != Door.DOWN:
+                if (current < sun["sunrise"] or current > after_sunset) and self.door_status != Door.CLOSED and self.direction != Door.DOWN:
                     print "Door should be closed"
                     self.closeDoor()
-                elif current > sun["sunrise"] and current < sun["sunset"] and self.door_status != Door.OPEN and self.direction != Door.UP:
+                elif current > sun["sunrise"] and current < after_sunset and self.door_status != Door.OPEN and self.direction != Door.UP:
                     print "Door should be open"
                     self.openDoor()
             time.sleep(1)
@@ -155,9 +156,9 @@ class Door(object):
 
     def blink(self):
         while(self.door_mode == Door.MANUAL):
-            GPIO.output(26, GPIO.LOW)
+            GPIO.output(Door.PIN_LED, GPIO.LOW)
             time.sleep(1)
-            GPIO.output(26, GPIO.HIGH)
+            GPIO.output(Door.PIN_LED, GPIO.HIGH)
             time.sleep(1)
             print (time.time()) - self.manual_mode_start
             if int(time.time()) - self.manual_mode_start > Door.MAX_MANUAL_MODE_TIME:
@@ -168,7 +169,7 @@ class Door(object):
         if new_mode == Door.AUTO: 
             print "Enter auto mode"
             self.door_mode = Door.AUTO
-            GPIO.output(26, GPIO.HIGH)
+            GPIO.output(Door.PIN_LED, GPIO.HIGH)
         else:
             print "Enter manual mode"
             self.door_mode = Door.MANUAL
