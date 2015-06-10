@@ -4,6 +4,9 @@ from threading import Thread
 import thread
 import pytz
 import time
+import sys
+import Adafruit_DHT
+import glob
 import datetime
 import RPi.GPIO as GPIO
 from astral import Astral
@@ -33,6 +36,7 @@ logger.addHandler(fh)
 logger.addHandler(ch)
 
 
+
 class Door(object):
     MAX_MANUAL_MODE_TIME = 60 * 60
     TIMEZONE_CITY = 'Boston'
@@ -56,16 +60,24 @@ class Door(object):
         self.door_mode = Door.AUTO
         self.manual_mode_start = 0
 
+        base_dir = '/sys/bus/w1/devices/'
+        device_folder = glob.glob(base_dir + '28*')[0]
+        self.device_file = device_folder + '/w1_slave'
+
         a = Astral()
         self.city = a[Door.TIMEZONE_CITY]
         self.setupPins()
 
         t1 = Thread(target = self.checkInputs)
         t2 = Thread(target = self.checkTime)
+        t3 = Thread(target = self.readTemps)
         t1.setDaemon(True)
         t2.setDaemon(True)
+        t3.setDaemon(True)
         t1.start()
         t2.start()
+        t3.start()
+
 
         host = 'localhost'
         port = 55567
@@ -107,6 +119,41 @@ class Door(object):
         GPIO.setup(Door.PIN_SENSOR_TOP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(Door.PIN_BUTTON_UP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(Door.PIN_BUTTON_DOWN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+    def readTempRaw(self):
+        f = open(self.device_file, 'r')
+        lines = f.readlines()
+        f.close()
+        return lines
+     
+    def readTemps(self):
+        while True:
+            lines = self.readTempRaw()
+            while lines[0].strip()[-3:] != 'YES':
+                time.sleep(0.2)
+                lines = self.readTempRaw()
+            equals_pos = lines[1].find('t=')
+            if equals_pos != -1:
+                temp_string = lines[1][equals_pos+2:]
+                temp_c = float(temp_string) / 1000.0
+                temp_f = temp_c * 9.0 / 5.0 + 32.0
+                logger.info("Water temp: %f" % temp_f)
+
+                humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.AM2302, 22)
+                if humidity is not None and temperature is not None:
+                    temp_f = temperature * 9.0 / 5.0 + 32.0
+                    logger.info('Temp={0:0.1f}*C  Humidity={1:0.1f}%'.format(temp_f, humidity))
+                else:
+                    print 'Failed to get reading. Try again!'
+
+                humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.AM2302, 6)
+                if humidity is not None and temperature is not None:
+                    temp_f = temperature * 9.0 / 5.0 + 32.0
+                    logger.info('Temp={0:0.1f}*C  Humidity={1:0.1f}%'.format(temp_f, humidity))
+                else:
+                    print 'Failed to get reading. Try again!'
+
+            time.sleep(60 * 60)
 
     def closeDoor(self):
         (top, bottom) = self.currentInputStatus()
