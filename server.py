@@ -1,4 +1,5 @@
 import logging
+import requests
 from socket import *
 from threading import Thread
 import thread
@@ -37,7 +38,7 @@ logger.addHandler(ch)
 
 class Coop(object):
     MAX_MANUAL_MODE_TIME = 60 * 60
-    TEMP_INTERVAL = 60*60
+    TEMP_INTERVAL = 60 * 5
     TIMEZONE_CITY = 'Boston'
     AFTER_SUNSET_DELAY = 30
     IDLE = UNKNOWN = NOT_TRIGGERED = AUTO = 0
@@ -69,9 +70,13 @@ class Coop(object):
         self.humidity2 = 0
         self.cache = {}
 
-        base_dir = '/sys/bus/w1/devices/'
-        device_folder = glob.glob(base_dir + '28*')[0]
-        self.device_file = device_folder + '/w1_slave'
+        try:
+            base_dir = '/sys/bus/w1/devices/'
+            device_folder = glob.glob(base_dir + '28*')[0]
+            self.device_file = device_folder + '/w1_slave'
+        except:
+            self.device_file = None
+            pass
 
         a = Astral()
         self.city = a[Coop.TIMEZONE_CITY]
@@ -97,7 +102,7 @@ class Coop(object):
         serversocket.listen(2)
 
         self.changeDoorMode(Coop.AUTO)
-        self.stop
+        self.stopDoor(0)
 
         GPIO.add_event_detect(Coop.PIN_BUTTON_UP, GPIO.RISING, callback=self.buttonPress, bouncetime=200)
         GPIO.add_event_detect(Coop.PIN_BUTTON_DOWN, GPIO.RISING, callback=self.buttonPress, bouncetime=200)
@@ -170,6 +175,15 @@ class Coop(object):
             logger.info("Door is in an unknown state")
             self.door_status = Coop.UNKNOWN
 
+            payload = {'status': self.door_status, 'ts': datetime.datetime.now() }
+            self.postData('door', payload)
+
+    def postData(self, endpoint, payload):
+        try:
+            r = requests.post("http://ryandetzel.com:3000/api/" + endpoint, data=payload)
+        except Exception as e:
+            logger.error(e)
+
     def checkTime(self):
         while True:
             if self.door_mode == Coop.AUTO:
@@ -193,6 +207,8 @@ class Coop(object):
         return lines
 
     def waterTemp(self):
+        if self.device_file is None:
+            return
         lines = self.readTempRaw()
         while lines[0].strip()[-3:] != 'YES':
             time.sleep(0.2)
@@ -204,6 +220,10 @@ class Coop(object):
             temp_f = temp_c * 9.0 / 5.0 + 32.0
             self.temp_water = temp_f
             logger.info("Water temp: %f" % temp_f)
+
+
+            payload = {'name': 'water', 'temperature': temp_f, 'humidity': 0, 'ts': datetime.datetime.now() }
+            self.postData('temperature', payload)
 
     def tempForPin(self, pin):
         retries = 3
@@ -218,15 +238,22 @@ class Coop(object):
             #if cache[pin] and abs(cache[pin] - temp_f) > 20:
             #    retries -= 1
             #    continue
-            logger.info('Temp={0:0.1f}*C  Humidity={1:0.1f}%'.format(temp_f, humidity))
+            logger.info('Temp={0:0.1f}*F  Humidity={1:0.1f}%'.format(temp_f, humidity))
             return temp_f, humidity
 
         logger.error('Failed to get reading temp. Try again!')
         return (0, 0)
 
     def otherTemps(self):
-        (self.temp1, self.humidity1) = tempForPin(Coop.PIN_TEMP1)
-        (self.temp2, self.humidity2) = tempForPin(Coop.PIN_TEMP2)
+        (self.temp1, self.humidity1) = self.tempForPin(Coop.PIN_TEMP1)
+        (self.temp2, self.humidity2) = self.tempForPin(Coop.PIN_TEMP2)
+        
+        ts = datetime.datetime.now()
+        payload = {'name': 'temp1', 'temperature': self.temp1, 'humidity': self.humidity1, 'ts': ts}
+        self.postData('temperature', payload)
+
+        payload = {'name': 'temp2', 'temperature': self.temp2, 'humidity': self.humidity2, 'ts': ts }
+        self.postData('temperature', payload)
 
     def readTemps(self):
         while True:
