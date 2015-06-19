@@ -1,3 +1,4 @@
+import os
 import logging
 import requests
 from socket import *
@@ -20,10 +21,11 @@ from astral import Astral
 # Record how long it takes to open the door, close
 # ERror states
 
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-fh = logging.FileHandler('log.log')
+fh = logging.FileHandler('/tmp/log.log')
 fh.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
@@ -38,6 +40,7 @@ logger.addHandler(ch)
 
 class Coop(object):
     MAX_MANUAL_MODE_TIME = 60 * 60
+    MAX_MOTOR_ON = 60
     TEMP_INTERVAL = 60 * 5
     TIMEZONE_CITY = 'Boston'
     AFTER_SUNSET_DELAY = 30
@@ -60,6 +63,7 @@ class Coop(object):
 
     def __init__(self):
         self.door_status = Coop.UNKNOWN
+        self.started_motor = None 
         self.direction = Coop.IDLE
         self.door_mode = Coop.AUTO
         self.manual_mode_start = 0
@@ -69,6 +73,10 @@ class Coop(object):
         self.humidity1 = 0
         self.humidity2 = 0
         self.cache = {}
+
+        self.mail_key = os.environ.get('MAILGUN_KEY') or exit('You need a key set')
+        self.mail_url = os.environ.get('MAILGUN_URL') or exit('You need a key set')
+        self.mail_recipient = os.environ.get('MAILGUN_RECIPIENT') or exit('You need a key set')
 
         try:
             base_dir = '/sys/bus/w1/devices/'
@@ -91,7 +99,6 @@ class Coop(object):
         t1.start()
         t2.start()
         t3.start()
-
 
         host = 'localhost'
         port = 55567
@@ -150,6 +157,7 @@ class Coop(object):
             logger.info("Door is already open")
             return
         logger.info("Opening door")
+        self.started_motor = datetime.datetime.now()
         GPIO.output(Coop.PIN_MOTOR_ENABLE, GPIO.HIGH)
         GPIO.output(Coop.PIN_MOTOR_A, GPIO.HIGH)
         GPIO.output(Coop.PIN_MOTOR_B, GPIO.LOW)
@@ -163,20 +171,48 @@ class Coop(object):
             GPIO.output(Coop.PIN_MOTOR_A, GPIO.LOW)
             GPIO.output(Coop.PIN_MOTOR_B, GPIO.LOW)
             self.direction = Coop.IDLE
+            self.started_motor = None
 
         (top, bottom) = self.currentTriggerStatus()
         if (top == Coop.TRIGGERED):
             logger.info("Door is open")
             self.door_status = Coop.OPEN
+            self.sendEmail('Coop door is OPEN', 'Yay!')
         elif (bottom == Coop.TRIGGERED):
             logger.info("Door is closed")
             self.door_status = Coop.CLOSED
+            self.sendEmail('Coop door is CLOSED', 'Yay!')
         else:
             logger.info("Door is in an unknown state")
             self.door_status = Coop.UNKNOWN
 
             payload = {'status': self.door_status, 'ts': datetime.datetime.now() }
             self.postData('door', payload)
+
+    def emergencyStopDoor(self, reason):
+        ## Just shut it off no matter what
+        logger.info("Emergency Stop door: " + reason)
+        GPIO.output(Coop.PIN_MOTOR_ENABLE, GPIO.LOW)
+        GPIO.output(Coop.PIN_MOTOR_A, GPIO.LOW)
+        GPIO.output(Coop.PIN_MOTOR_B, GPIO.LOW)
+        self.direction = Coop.IDLE
+        self.started_motor = None
+        self.stopDoor()
+        self.sendEmail('Coop Emergency STOP', reason)
+
+    def sendEmail(self, subject, content):
+        logger.info("Sending email: %s" % subject)
+        try:
+            request = requests.post(
+                self.mail_url,
+                auth=("api", self.mail_key),
+                data={"from": "Chickens <mailgun@mailgun.dxxd.net>",
+                      "to": [self.mail_recipient],
+                      "subject": subject,
+                      "text": content}) 
+            logger.info('Status: {0}'.format(request.status_code))
+        except Exception as e:
+            logger.error("Error: " + e)
 
     def postData(self, endpoint, payload):
         try:
@@ -191,11 +227,12 @@ class Coop(object):
                 sun = self.city.sun(date=datetime.datetime.now(), local=True)
 
                 after_sunset = sun["sunset"] + datetime.timedelta(minutes = Coop.AFTER_SUNSET_DELAY)
+                after_sunrise = sun["sunrise"] + datetime.timedelta(hours = 2) 
 
-                if (current < sun["sunrise"] or current > after_sunset) and self.door_status != Coop.CLOSED and self.direction != Coop.DOWN:
+                if (current < after_sunrise or current > after_sunset) and self.door_status != Coop.CLOSED and self.direction != Coop.DOWN:
                     logger.info("Door should be closed based on time")
                     self.closeDoor()
-                elif current > sun["sunrise"] and current < after_sunset and self.door_status != Coop.OPEN and self.direction != Coop.UP:
+                elif current > after_sunrise and current < after_sunset and self.door_status != Coop.OPEN and self.direction != Coop.UP:
                     logger.info("Door should be open based on time")
                     self.openDoor()
             time.sleep(1)
@@ -275,6 +312,12 @@ class Coop(object):
             if (self.direction == Coop.DOWN and bottom == Coop.TRIGGERED):
                 logger.info("Bottom sensor triggered")
                 self.stopDoor(1)
+
+            # Check for issues
+            if self.started_motor:
+                if (datetime.datetime.now() - self.started_motor).seconds > Coop.MAX_MOTOR_ON:
+                    self.emergencyStopDoor('Motor ran too long')
+
             time.sleep(0.01)
 
     def changeDoorMode(self, new_mode):
