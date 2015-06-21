@@ -40,13 +40,13 @@ logger.addHandler(ch)
 
 class Coop(object):
     MAX_MANUAL_MODE_TIME = 60 * 60
-    MAX_MOTOR_ON = 60
+    MAX_MOTOR_ON = 45
     TEMP_INTERVAL = 60 * 5
     TIMEZONE_CITY = 'Boston'
     AFTER_SUNSET_DELAY = 30
     IDLE = UNKNOWN = NOT_TRIGGERED = AUTO = 0
     UP = OPEN = TRIGGERED = MANUAL = 1
-    DOWN = CLOSED = 2
+    DOWN = CLOSED = HALT = 2
 
     PIN_LED = 5
     PIN_BUTTON_UP = 13
@@ -118,7 +118,7 @@ class Coop(object):
             try:
                 logger.info("Server is listening for connections\n")
                 clientsocket, clientaddr = serversocket.accept()
-                thread.start_new_thread(handler, (clientsocket, clientaddr))
+                thread.start_new_thread(self.handler, (clientsocket, clientaddr))
             except KeyboardInterrupt:
                 break
             time.sleep(0.01)
@@ -146,6 +146,7 @@ class Coop(object):
             logger.info("Door is already closed")
             return
         logger.info("Closing door")
+        self.started_motor = datetime.datetime.now()
         GPIO.output(Coop.PIN_MOTOR_ENABLE, GPIO.HIGH)
         GPIO.output(Coop.PIN_MOTOR_A, GPIO.LOW)
         GPIO.output(Coop.PIN_MOTOR_B, GPIO.HIGH)
@@ -197,7 +198,8 @@ class Coop(object):
         GPIO.output(Coop.PIN_MOTOR_B, GPIO.LOW)
         self.direction = Coop.IDLE
         self.started_motor = None
-        self.stopDoor()
+        self.changeDoorMode(Coop.HALT)
+        self.stopDoor(0)
         self.sendEmail('Coop Emergency STOP', reason)
 
     def sendEmail(self, subject, content):
@@ -210,7 +212,7 @@ class Coop(object):
                       "to": [self.mail_recipient],
                       "subject": subject,
                       "text": content}) 
-            logger.info('Status: {0}'.format(request.status_code))
+            #logger.info('Status: {0}'.format(request.status_code))
         except Exception as e:
             logger.error("Error: " + e)
 
@@ -314,7 +316,7 @@ class Coop(object):
                 self.stopDoor(1)
 
             # Check for issues
-            if self.started_motor:
+            if self.started_motor is not None:
                 if (datetime.datetime.now() - self.started_motor).seconds > Coop.MAX_MOTOR_ON:
                     self.emergencyStopDoor('Motor ran too long')
 
@@ -327,7 +329,7 @@ class Coop(object):
             GPIO.output(Coop.PIN_LED, GPIO.HIGH)
         else:
             logger.info("Entered manual mode")
-            self.door_mode = Coop.MANUAL
+            self.door_mode = new_mode
             self.stopDoor(0)
             self.manual_mode_start = int(time.time())
 
@@ -361,18 +363,19 @@ class Coop(object):
                 self.closeDoor()
 
     def blink(self):
-        while(self.door_mode == Coop.MANUAL):
+        while(self.door_mode != Coop.AUTO):
             GPIO.output(Coop.PIN_LED, GPIO.LOW)
             time.sleep(1)
             GPIO.output(Coop.PIN_LED, GPIO.HIGH)
             time.sleep(1)
-            if int(time.time()) - self.manual_mode_start > Coop.MAX_MANUAL_MODE_TIME:
-                logger.info("In manual mode too long, switching")
-                self.changeDoorMode(Coop.AUTO)
+            if self.door_mode == Coop.MANUAL: 
+                if int(time.time()) - self.manual_mode_start > Coop.MAX_MANUAL_MODE_TIME:
+                    logger.info("In manual mode too long, switching")
+                    self.changeDoorMode(Coop.AUTO)
 
 
     def handler(self, clientsocket, clientaddr):
-        logger.info("Accepted connection from: ", clientaddr)
+        #logger.info("Accepted connection from: %s " % clientaddr)
 
         while True:
             data = clientsocket.recv(1024)
@@ -381,11 +384,20 @@ class Coop(object):
             else:
                 data = data.strip()
                 if (data == 'stop'):
+                    self.changeDoorMode(Coop.MANUAL)
                     self.stopDoor(0)
                 elif (data == 'open'):
+                    self.changeDoorMode(Coop.MANUAL)
                     self.openDoor()
                 elif (data == 'close'):
+                    self.changeDoorMode(Coop.MANUAL)
                     self.closeDoor()
+                elif (data == 'manual'):
+                    self.changeDoorMode(Coop.MANUAL)
+                elif (data == 'auto'):
+                    self.changeDoorMode(Coop.AUTO)
+                elif (data == 'halt'):
+                    self.changeDoorMode(Coop.HALT)
                 #msg = "You sent me: %s" % data
                 #clientsocket.send(msg)
             time.sleep(0.01)
