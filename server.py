@@ -43,7 +43,8 @@ class Coop(object):
     MAX_MOTOR_ON = 45
     TEMP_INTERVAL = 60 * 5
     TIMEZONE_CITY = 'Boston'
-    AFTER_SUNSET_DELAY = 30
+    AFTER_SUNSET_DELAY = 60
+    AFTER_SUNRISE_DELAY = 3 * 60
     IDLE = UNKNOWN = NOT_TRIGGERED = AUTO = 0
     UP = OPEN = TRIGGERED = MANUAL = 1
     DOWN = CLOSED = HALT = 2
@@ -72,6 +73,7 @@ class Coop(object):
         self.temp2 = 0
         self.humidity1 = 0
         self.humidity2 = 0
+        self.second_chance = True
         self.cache = {}
 
         self.mail_key = os.environ.get('MAILGUN_KEY') or exit('You need a key set')
@@ -229,13 +231,18 @@ class Coop(object):
                 sun = self.city.sun(date=datetime.datetime.now(), local=True)
 
                 after_sunset = sun["sunset"] + datetime.timedelta(minutes = Coop.AFTER_SUNSET_DELAY)
-                after_sunrise = sun["sunrise"] + datetime.timedelta(hours = 2) 
+                after_sunrise = sun["sunrise"] + datetime.timedelta(minutes = Coop.AFTER_SUNRISE_DELAY) 
 
                 if (current < after_sunrise or current > after_sunset) and self.door_status != Coop.CLOSED and self.direction != Coop.DOWN:
-                    logger.info("Door should be closed based on time")
+                    logger.info("Door should be closed based on time of day")
                     self.closeDoor()
+
+                    if self.second_chance:
+                        t2 = Thread(target = self.secondChance)
+                        t2.setDaemon(True)
+                        t2.start()
                 elif current > after_sunrise and current < after_sunset and self.door_status != Coop.OPEN and self.direction != Coop.UP:
-                    logger.info("Door should be open based on time")
+                    logger.info("Door should be open based on time of day")
                     self.openDoor()
             time.sleep(1)
 
@@ -323,6 +330,10 @@ class Coop(object):
             time.sleep(0.01)
 
     def changeDoorMode(self, new_mode):
+        if new_mode == self.door_mode:
+            logger.info("Already in that mode")
+            return
+
         if new_mode == Coop.AUTO:
             logger.info("Entered auto mode")
             self.door_mode = Coop.AUTO
@@ -361,6 +372,16 @@ class Coop(object):
                 self.openDoor()
             else:
                 self.closeDoor()
+
+    def secondChance(self):
+        logger.info("Starting second chance timer")
+        time.sleep(10 * 60)
+        if self.door_status == Coop.CLOSED || self.door_status == Coop.UNKNOWN:
+            logger.info("Opening door for second chance")
+            self.openDoor()
+            time.sleep(10 * 60)
+            logger.info("Closing door for the night")
+            self.closeDoor()
 
     def blink(self):
         while(self.door_mode != Coop.AUTO):
