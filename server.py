@@ -45,6 +45,7 @@ class Coop(object):
     TIMEZONE_CITY = 'Boston'
     AFTER_SUNSET_DELAY = 60
     AFTER_SUNRISE_DELAY = 3 * 60
+    SECOND_CHANCE_DELAY = 60 * 10
     IDLE = UNKNOWN = NOT_TRIGGERED = AUTO = 0
     UP = OPEN = TRIGGERED = MANUAL = 1
     DOWN = CLOSED = HALT = 2
@@ -375,11 +376,11 @@ class Coop(object):
 
     def secondChance(self):
         logger.info("Starting second chance timer")
-        time.sleep(10 * 60)
-        if self.door_status == Coop.CLOSED || self.door_status == Coop.UNKNOWN:
+        time.sleep(Coop.SECOND_CHANCE_DELAY)
+        if self.door_status == Coop.CLOSED or self.door_status == Coop.UNKNOWN:
             logger.info("Opening door for second chance")
             self.openDoor()
-            time.sleep(10 * 60)
+            time.sleep(Coop.SECOND_CHANCE_DELAY)
             logger.info("Closing door for the night")
             self.closeDoor()
 
